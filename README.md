@@ -1,5 +1,10 @@
 # 阈值处理软件
 
+[![GitHub stars](https://img.shields.io/github/stars/Co-STEM-Lab/threshold_processor_gui?style=flat-square)](https://github.com/Co-STEM-Lab/threshold_processor_gui/stargazers)
+[![GitHub release](https://img.shields.io/github/v/release/Co-STEM-Lab/threshold_processor_gui?style=flat-square)](https://github.com/Co-STEM-Lab/threshold_processor_gui/releases)
+[![GitHub downloads](https://img.shields.io/github/downloads/Co-STEM-Lab/threshold_processor_gui/total?style=flat-square)](https://github.com/Co-STEM-Lab/threshold_processor_gui/releases)
+[![License](https://img.shields.io/github/license/Co-STEM-Lab/threshold_processor_gui?style=flat-square)](./LICENSE)
+
 基于 PyQt6 的图像阈值分割交互式调参工具。支持多种阈值策略与梯度分水岭算法，后台线程处理保证界面流畅，适用于材料显微图像（如合金晶粒）的自动分割与尺寸统计。
 
 ## 功能特性
@@ -133,6 +138,12 @@ threshold_processor_gui/
 ├── .gitignore
 └── venv/                        # 虚拟环境（本地，不入库）
 ```
+
+## 引用
+
+如果您使用了本软件，请引用以下文章：
+
+> *文章信息待补充*
 
 ## 作者
 
