@@ -13,7 +13,7 @@ from datetime import datetime
 import numpy as np
 from PIL import Image
 from skimage import filters
-from skimage.measure import label, regionprops
+from skimage.measure import label, regionprops, find_contours
 from skimage.segmentation import watershed, find_boundaries
 from skimage import morphology
 from scipy import ndimage as ndi
@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
     QGridLayout, QLabel, QComboBox, QSlider,
     QPushButton, QFileDialog, QGroupBox, QStatusBar,
     QMessageBox, QSizePolicy, QPlainTextEdit, QDockWidget, QSplitter,
-    QFrame, QDialog, QDialogButtonBox, QRubberBand,
+    QFrame, QDialog, QDialogButtonBox, QRubberBand, QCheckBox, QLineEdit,
 )
 
 import matplotlib
@@ -198,6 +198,43 @@ def compute_grain_stats(masks, img_shape):
             'minor_axis_px': round(float(minor), 1),
         })
     return grains
+
+
+def binary_mask_to_svg(binary_mask):
+    """Convert a binary mask to an SVG string via contour tracing.
+
+    Parameters
+    ----------
+    binary_mask : np.ndarray
+        2D boolean array.
+
+    Returns
+    -------
+    str
+        SVG document as a string.
+    """
+    h, w = binary_mask.shape
+    contours = find_contours(binary_mask.astype(float), level=0.5)
+
+    svg_lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
+        f'viewBox="0 0 {w} {h}">',
+        f'<rect width="{w}" height="{h}" fill="white"/>',
+    ]
+
+    for contour in contours:
+        if len(contour) < 3:
+            continue
+        # contour is (N, 2) of (row, col) — convert to SVG (x, y)
+        path_data = 'M ' + ' L '.join(
+            f'{c[1]:.1f},{c[0]:.1f}' for c in contour) + ' Z'
+        svg_lines.append(
+            f'<path d="{path_data}" fill="black" fill-rule="evenodd" '
+            f'stroke="black" stroke-width="0.5"/>'
+        )
+
+    svg_lines.append('</svg>')
+    return '\n'.join(svg_lines)
 
 
 # ====================================================================
@@ -429,7 +466,7 @@ class IntParamSlider(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('DD5 Alloy Segmentation — 阈值调参工具')
+        self.setWindowTitle('阈值处理软件')
         self.setMinimumSize(1300, 850)
 
         self._img = None
@@ -764,6 +801,8 @@ class MainWindow(QMainWindow):
     def _on_worker_finished(self, result):
         self._masks = result['masks']
         self._grains = result['grains']
+        self._binary_mask = result['binary']
+        self._label_rgb = result['label_rgb']
         self.v1.set_image(result['binary'].astype(np.float32))
         self.v2.set_image(result['label_rgb'])
         # Sync initial view with original
@@ -851,30 +890,184 @@ class MainWindow(QMainWindow):
         if not self._masks:
             QMessageBox.information(self, 'Info', 'No results.')
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, 'Save Results',
-            os.path.join(self._last_dir, 'results.json'),
-            'JSON (*.json);;PNG Image (*.png)')
-        if not path:
-            return
-        ext = Path(path).suffix.lower()
+
+        dlg = SaveImagesDialog(self._last_dir, self)
+        if not dlg.exec():
+            return  # user cancelled
+
+        sel = dlg.get_selections()
+        fmt = sel['format']
+        ext = sel['ext']
+        base = sel['base_name']
+        directory = sel['directory']
+        save_binary = sel['save_binary']
+        save_seg = sel['save_seg']
+
+        saved_files = []
         try:
-            if ext == '.json':
-                out = {
-                    'image': Path(self._image_path).name if self._image_path else '',
-                    'n_grains': len(self._grains),
-                    'grains': self._grains,
-                }
-                with open(path, 'w') as f:
-                    json.dump(out, f, indent=2, ensure_ascii=False)
-                self.log_msg(f'[{datetime.now():%H:%M:%S}] \U0001F4BE Saved: {path}')
-            elif ext == '.png':
-                _, label_rgb = make_colored_overlay(self._img, self._masks)
-                Image.fromarray(label_rgb).save(path)
-                self.log_msg(f'[{datetime.now():%H:%M:%S}] \U0001F4BE Saved: {path}')
+            if save_binary:
+                path = os.path.join(directory, f'{base}_binary_mask{ext}')
+                if ext == '.svg':
+                    svg_str = binary_mask_to_svg(self._binary_mask)
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(svg_str)
+                else:
+                    # Convert boolean to uint8 0/255 for image saving
+                    bin_img = (self._binary_mask.astype(np.uint8) * 255)
+                    Image.fromarray(bin_img, mode='L').save(path)
+                saved_files.append(path)
+
+            if save_seg:
+                path = os.path.join(directory, f'{base}_segmentation{ext}')
+                if ext == '.svg':
+                    # SVG for segmentation: embed raster as base64 PNG
+                    import base64
+                    import io
+                    buf = io.BytesIO()
+                    Image.fromarray(self._label_rgb).save(buf, format='PNG')
+                    b64 = base64.b64encode(buf.getvalue()).decode()
+                    h, w = self._label_rgb.shape[:2]
+                    svg_str = (
+                        f'<svg xmlns="http://www.w3.org/2000/svg" '
+                        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
+                        f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">'
+                        f'<image width="{w}" height="{h}" '
+                        f'xlink:href="data:image/png;base64,{b64}"/>'
+                        f'</svg>'
+                    )
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(svg_str)
+                else:
+                    img_to_save = self._label_rgb
+                    if ext in ('.jpg', '.jpeg') and img_to_save.shape[2] == 4:
+                        # Drop alpha channel for JPEG
+                        img_to_save = img_to_save[:, :, :3]
+                    Image.fromarray(img_to_save).save(path)
+                saved_files.append(path)
+
+            for p in saved_files:
+                self.log_msg(
+                    f'[{datetime.now():%H:%M:%S}] \U0001F4BE Saved: {p}')
+            self._last_dir = directory
+
         except Exception as e:
             QMessageBox.critical(self, 'Error', f'Save failed: {e}')
 
+
+class SaveImagesDialog(QDialog):
+    """Dialog for choosing format and which images to save."""
+
+    FORMATS = [
+        ('PNG  (*.png)',  '.png'),
+        ('TIFF (*.tif)',  '.tif'),
+        ('JPEG (*.jpg)',  '.jpg'),
+        ('BMP  (*.bmp)',  '.bmp'),
+        ('SVG  (*.svg)',  '.svg'),
+    ]
+
+    def __init__(self, last_dir, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Save Images')
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        # --- Format ---
+        fl = QHBoxLayout()
+        fl.addWidget(QLabel('Format:'))
+        self.cb_format = QComboBox()
+        for label, _ext in self.FORMATS:
+            self.cb_format.addItem(label)
+        self.cb_format.setCurrentIndex(0)
+        self.cb_format.currentTextChanged.connect(self._on_format_changed)
+        fl.addWidget(self.cb_format)
+        fl.addStretch()
+        layout.addLayout(fl)
+
+        # --- Images to save ---
+        img_group = QGroupBox('Images to save')
+        ig_layout = QVBoxLayout(img_group)
+        self.cb_binary = QCheckBox('Binary Mask')
+        self.cb_binary.setChecked(True)
+        self.cb_binary.toggled.connect(self._update_preview)
+        ig_layout.addWidget(self.cb_binary)
+
+        self.cb_seg = QCheckBox('Segmentation Result')
+        self.cb_seg.setChecked(True)
+        self.cb_seg.toggled.connect(self._update_preview)
+        ig_layout.addWidget(self.cb_seg)
+        layout.addWidget(img_group)
+
+        # --- Directory ---
+        dl = QHBoxLayout()
+        dl.addWidget(QLabel('Save to:'))
+        self.le_dir = QLineEdit(last_dir)
+        dl.addWidget(self.le_dir)
+        btn_browse = QPushButton('Browse...')
+        btn_browse.clicked.connect(self._browse_dir)
+        dl.addWidget(btn_browse)
+        layout.addLayout(dl)
+
+        # --- Base name ---
+        nl = QHBoxLayout()
+        nl.addWidget(QLabel('Base name:'))
+        self.le_name = QLineEdit('result')
+        self.le_name.textChanged.connect(self._update_preview)
+        nl.addWidget(self.le_name)
+        layout.addLayout(nl)
+
+        # --- Preview ---
+        self.lbl_preview = QLabel('')
+        self.lbl_preview.setStyleSheet('color: #aaa; font-size: 11px;')
+        layout.addWidget(self.lbl_preview)
+        self._update_preview()
+
+        # --- Buttons ---
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save |
+            QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
+
+    # ------------------------------------------------------------------
+
+    def _on_format_changed(self, text):
+        # Update preview when format changes
+        # SVG for segmentation embeds a base64 PNG (larger file, but works)
+        self._update_preview()
+
+    def _browse_dir(self):
+        d = QFileDialog.getExistingDirectory(
+            self, 'Select Directory', self.le_dir.text())
+        if d:
+            self.le_dir.setText(d)
+
+    def _update_preview(self):
+        ext = self.FORMATS[self.cb_format.currentIndex()][1]
+        base = self.le_name.text() or 'result'
+        parts = []
+        if self.cb_binary.isChecked():
+            parts.append(f'{base}_binary_mask{ext}')
+        if self.cb_seg.isChecked():
+            parts.append(f'{base}_segmentation{ext}')
+        self.lbl_preview.setText(
+            '→  ' + ',  '.join(parts) if parts else '→  (none selected)')
+
+    # ------------------------------------------------------------------
+
+    def get_selections(self):
+        ext = self.FORMATS[self.cb_format.currentIndex()][1]
+        fmt_label = self.cb_format.currentText()
+        return {
+            'format': fmt_label,
+            'ext': ext,
+            'directory': self.le_dir.text(),
+            'base_name': self.le_name.text() or 'result',
+            'save_binary': self.cb_binary.isChecked(),
+            'save_seg': self.cb_seg.isChecked(),
+        }
 
 
 class PlotDialog(QDialog):
